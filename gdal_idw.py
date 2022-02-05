@@ -10,7 +10,7 @@ import numpy as np
 from rasterstats import zonal_stats
 from rasterio.plot import show
 import rasterio
-from zonal_stats import zonal_stats
+
 shp = os.path.join('shapefiles', 'nitrate_wgs84.shp')
 gdf = gpd.read_file(shp)
 # gdf.geometry = gdf.apply(lambda r: Point(r.geometry.x, r.geometry.y, r.nitr_ran), axis=1)
