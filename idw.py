@@ -7,10 +7,12 @@ import numpy as np
 import osr
 import pandas as pd
 import rasterio
+from affine import Affine
+from sklearn.linear_model import LinearRegression
 from rasterstats import zonal_stats
 from scipy.spatial import KDTree
 
-#...............................................................................
+#.
 class IDWGenerator:
     """ 
     https://stackoverflow.com/a/3119544/8947008
@@ -131,13 +133,19 @@ class IDWGenerator:
         xres = (xmax-xmin)/float(ncols)
         yres = (ymax-ymin)/float(nrows)
         geotransform=(xmin,xres,0,ymax,0, -yres)
+        output_raster = gdal.GetDriverByName('GTiff')\
+            .Create(output_tif,ncols, nrows, 1 ,gdal.GDT_Float32) # open file
+        output_raster.SetGeoTransform(geotransform) 
+        
+        # set SRS to EPSG 4326 (WGS84)
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        output_raster.SetProjection( srs.ExportToWkt() )
 
-        output_raster = gdal.GetDriverByName('GTiff').Create(output_tif,ncols, nrows, 1 ,gdal.GDT_Float32)  # Open the file
-        output_raster.SetGeoTransform(geotransform)  # Specify its coordinates
-        srs = osr.SpatialReference()                 # Establish its coordinate encoding
-        srs.ImportFromEPSG(4326)                     # This one specifies WGS84 lat long.
-        output_raster.SetProjection( srs.ExportToWkt() )   # Exports the coordinate system 
-        output_raster.GetRasterBand(1).WriteArray(grid)   # Writes my array to the raster
+        # write array to raster
+        output_raster.GetRasterBand(1).WriteArray(grid)
+
+        # make sure there is no lock on the file
         output_raster.FlushCache()
         output_raster = None
 
@@ -147,3 +155,77 @@ class IDWGenerator:
         df = pd.DataFrame(stats)
         final_df = pd.merge(tracts, df, left_index=True, right_index=True)
         final_df.to_file(output_file)
+
+
+NNEAR = 8  # number of nearest neighbors to look for
+EPS = .1  # approximate nearest, dist <= (1 + eps) * true nearest
+P = 2  # weights ~ 1 / distance**p
+RESOLUTION = 500
+
+gdf = gpd.read_file(join('shapefiles', 'well_nitrate.shp'))
+gdf['x'] = gdf.geometry.x
+gdf['y'] = gdf.geometry.y
+xy = gdf[['x', 'y']].to_numpy()
+z = gdf.nitr_ran.to_numpy()
+# ask = generate_query_points(gdf, RESOLUTION)
+
+
+idw_gen = IDWGenerator(xy, z, gdf.total_bounds)
+ask = idw_gen.generate_query_points(resolution=RESOLUTION)
+interpol = idw_gen.interpolate(ask, nnear=NNEAR, eps=EPS, p=P )
+
+## get it into a grid, flip it (for some reason it is upside-down)
+final_grid = interpol.reshape((RESOLUTION, RESOLUTION))
+# final_grid = np.transpose(final_grid)
+final_grid = np.flip(final_grid, 0)
+
+# export to tif
+# raster_file = 'myraster_flip.tif'
+# idw_gen.export_to_tif(final_grid, raster_file)
+
+# calc zonal stats by reading in tif
+# possible it could just read in an array instead of first exporting to 
+# tif first
+
+
+vector_file = join('shapefiles', 'cancer_tracts_wgs84.shp')
+output_file = join('shapefiles', 'aggregateNitrate.shp')
+# with rasterio.open(raster_file) as src:
+#     affine = src.transform
+#     array = src.read(1)
+# stats = zonal_stats(vector_file, array, affine=(0.011839076599999998, 0.0, -92.8588226,
+#        0.0, -0.00880815964, 46.9032653))
+# idw_gen.calculate_zonal_stats(vector_file, raster_file, output_file)
+
+# pure numpy?
+nrows,ncols = np.shape(final_grid)
+xmin, ymin, xmax, ymax = gdf.total_bounds
+xres = (xmax-xmin)/float(ncols)
+yres = (ymax-ymin)/float(nrows)
+geotransform=(xmin,xres,0,ymax,0, -yres)
+affine = Affine.from_gdal(*geotransform)
+tracts = gpd.read_file(vector_file)
+stats = zonal_stats(tracts, final_grid, affine=affine)
+df = pd.DataFrame(stats)
+final_df = pd.merge(tracts, df, left_index=True, right_index=True)
+
+# regression
+
+
+def clean_dataset(df):
+    assert isinstance(df, pd.DataFrame), "df needs to be a pd.DataFrame"
+    df.dropna(inplace=True)
+    indices_to_keep = ~df.isin([np.nan, np.inf, -np.inf]).any(1)
+    return df[indices_to_keep].astype(np.float64)
+
+final_df = final_df[['canrate', 'mean']].copy()
+final_df = clean_dataset(final_df)
+X = final_df.canrate.values.reshape(-1, 1) # 1 column numpy array
+Y = final_df['mean'].values.reshape(-1, 1)
+linear_regressor = LinearRegression()
+linear_regressor.fit(X, Y)
+y_pred = linear_regressor.predict(X)
+
+plt.scatter(X, Y)
+plt.plot(X, y_pred, color='red')
+plt.show()

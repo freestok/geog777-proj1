@@ -5,7 +5,6 @@ import numpy as np
 
 from idw import IDWGenerator
 
-#...............................................................................
 NNEAR = 8  # number of nearest neighbors to look for
 EPS = .1  # approximate nearest, dist <= (1 + eps) * true nearest
 P = 2  # weights ~ 1 / distance**p
