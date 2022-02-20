@@ -7,8 +7,9 @@ import numpy as np
 import osr
 import pandas as pd
 import rasterio
+import statsmodels.api as sm
 from affine import Affine
-from sklearn.linear_model import LinearRegression
+# from sklearn.linear_model import LinearRegression
 from rasterstats import zonal_stats
 from scipy.spatial import KDTree
 
@@ -73,8 +74,9 @@ class IDWGenerator:
         self.wsum = None
         self.bounds = bounds
 
-    def interpolate( self, q, nnear=6, eps=0, p=1, weights=None ):
-            # nnear nearest neighbours of each query point --
+    def interpolate( self, q, nnear=6, eps=0.1, p=1, weights=None ):
+        # nnear nearest neighbours of each query point --
+        # eps is approximate nearest, dist <= (1 + eps) * true nearest
         q = np.asarray(q)
         qdim = q.ndim
         if qdim == 1:
@@ -158,7 +160,6 @@ class IDWGenerator:
 
 
 NNEAR = 8  # number of nearest neighbors to look for
-EPS = .1  # approximate nearest, dist <= (1 + eps) * true nearest
 P = 2  # weights ~ 1 / distance**p
 RESOLUTION = 500
 
@@ -172,7 +173,7 @@ z = gdf.nitr_ran.to_numpy()
 
 idw_gen = IDWGenerator(xy, z, gdf.total_bounds)
 ask = idw_gen.generate_query_points(resolution=RESOLUTION)
-interpol = idw_gen.interpolate(ask, nnear=NNEAR, eps=EPS, p=P )
+interpol = idw_gen.interpolate(ask, nnear=NNEAR, p=P )
 
 ## get it into a grid, flip it (for some reason it is upside-down)
 final_grid = interpol.reshape((RESOLUTION, RESOLUTION))
@@ -208,7 +209,7 @@ tracts = gpd.read_file(vector_file)
 stats = zonal_stats(tracts, final_grid, affine=affine)
 df = pd.DataFrame(stats)
 final_df = pd.merge(tracts, df, left_index=True, right_index=True)
-
+geom = final_df.geometry
 # regression
 
 
@@ -220,12 +221,44 @@ def clean_dataset(df):
 
 final_df = final_df[['canrate', 'mean']].copy()
 final_df = clean_dataset(final_df)
-X = final_df.canrate.values.reshape(-1, 1) # 1 column numpy array
-Y = final_df['mean'].values.reshape(-1, 1)
-linear_regressor = LinearRegression()
-linear_regressor.fit(X, Y)
-y_pred = linear_regressor.predict(X)
+final_df['geometry'] = geom
+Y = final_df.canrate.values.reshape(-1, 1) # 1 column numpy array
+X = final_df['mean'].values.reshape(-1, 1)
 
-plt.scatter(X, Y)
-plt.plot(X, y_pred, color='red')
+# # sci kit linear regression
+# linear_regressor = LinearRegression()
+# linear_regressor.fit(X, Y)
+# y_pred = linear_regressor.predict(X)
+# final_df['mean_prediction'] = y_pred
+# final_df['residual'] = final_df['mean'] - final_df.mean_prediction
+# # calc standardized residual
+# mean = final_df.residual.mean()
+# std = final_df.residual.std()
+# final_df['stdResid'] = (final_df.residual - mean) / std
+
+# statsmodels linear regression
+model = sm.OLS(Y,X)
+results = model.fit()
+influence = results.get_influence()
+results_summary = results.summary()
+
+# Note that tables is a list. The table at index 1 is the "core" table. Additionally, read_html puts dfs in a list, so we want index 0
+results_as_html = results_summary.tables[1].as_html()
+ols_df = pd.read_html(results_as_html, header=0, index_col=0)[0]
+
+
+final_df['fitVal'] = results.fittedvalues
+final_df['residuals'] = results.resid
+final_df['stdResid'] = influence.resid_studentized_internal
+# linear regression plot
+# plt.scatter(X, Y)
+# plt.plot(X, y_pred, color='red')
+
+# residual plot
+# plt.scatter(final_df.residual, y_pred)
+# standardized resiu=dual plot
+
+
 plt.show()
+
+gpd.GeoDataFrame(final_df).to_file('prediction.shp')
